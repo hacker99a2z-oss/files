@@ -1,0 +1,66 @@
+// ১. ইউজার তথ্য আনবে অথবা না থাকলে ডাটাবেজে তৈরি করবে (কান্ট্রি ডিটেকশনসহ)
+app.post('/api/user/sync', async (req, res) => {
+  const { telegramId, firstName, username, photoUrl, referrerId } = req.body;
+
+  if (!telegramId) {
+    return res.status(400).json({ error: 'Telegram ID required' });
+  }
+
+  try {
+    // ইউজারের আইপি ও কান্ট্রি ডিটেক্ট করা
+    let clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+    let countryName = 'Unknown';
+    let isVpnOrProxy = false;
+
+    if (clientIp && clientIp !== '::1' && clientIp !== '127.0.0.1') {
+      try {
+        const ipResponse = await axios.get(`http://ip-api.com/json/${clientIp}?fields=status,country,proxy,hosting`);
+        if (ipResponse.data.status === 'success') {
+          countryName = ipResponse.data.country;
+          if (ipResponse.data.proxy || ipResponse.data.hosting) {
+            isVpnOrProxy = true;
+          }
+        }
+      } catch (ipErr) {
+        console.log("Sync IP Check Error:", ipErr.message);
+      }
+    }
+
+    let user = await User.findOne({ telegramId }).populate('referrals', 'firstName username photoUrl gamesPlayedForReferral');
+
+    if (!user) {
+      user = new User({
+        telegramId,
+        firstName: firstName || 'User',
+        username: username || '',
+        photoUrl: photoUrl || '',
+        referredBy: referrerId || null,
+        country: countryName,
+        isVpn: isVpnOrProxy
+      });
+      await user.save();
+
+      if (referrerId && referrerId !== telegramId) {
+        await User.findOneAndUpdate(
+          { telegramId: referrerId },
+          {
+            $inc: { referralCount: 1 },
+            $push: { referrals: user._id }
+          }
+        );
+      }
+    } else {
+      // ইউজার আগে থেকেই থাকলে তার নাম, ছবি এবং কান্ট্রি/ভিপিএন আপডেট করে নেওয়া
+      user.firstName = firstName || user.firstName;
+      user.username = username || user.username;
+      user.photoUrl = photoUrl || user.photoUrl;
+      user.country = countryName !== 'Unknown' ? countryName : user.country; // আগেরটা অজানা না থাকলে সেটাই রাখবে
+      user.isVpn = isVpnOrProxy;
+      await user.save();
+    }
+
+    res.json(user);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
